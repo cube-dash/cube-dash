@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Cube Dash</title>
+<link rel="icon" type="image/png" href="favicon.png">
+
+<style>
+body{margin:0;background:#05070c;overflow:hidden;font-family:sans-serif}
+canvas{display:block}
+
+.menu{
+position:absolute;top:40%;left:50%;
+transform:translate(-50%,-50%);
+background:#111;border-radius:10px;padding:20px;color:white;text-align:center
+}
+button{padding:10px 20px;margin:5px;font-size:16px;cursor:pointer}
+
+.progressBar{
+position:absolute;top:15px;left:50%;
+transform:translateX(-50%);
+width:400px;height:12px;
+background:#222;border-radius:10px;overflow:hidden;
+}
+.progressFill{height:100%;width:0%;background:white}
+.bestText{
+position:absolute;top:35px;left:50%;
+transform:translateX(-50%);
+color:white;font-size:14px;
+}
+</style>
+</head>
+
+<body>
+
+<canvas id="game"></canvas>
+
+<div class="menu" id="menu">
+<h2>Select Level</h2>
+<p>Press SPACE to jump</p>
+<button onclick="startLevel(0)">Level 1</button>
+<button onclick="startLevel(1)">Level 2</button>
+<button onclick="startLevel(2)">Level 3</button>
+<button onclick="startLevel(3)">Level 4</button>
+
+</div>
+
+
+<div class="progressBar">
+<div class="progressFill" id="progressFill"></div>
+</div>
+<div class="bestText" id="bestText"></div>
+
+<script>
+/* ===== Music =====*/
+const MUSIC_SRC = "soundtrack.mp3"; 
+const bgm = new Audio(MUSIC_SRC);
+bgm.loop = true;
+bgm.preload = "auto";
+bgm.volume = 0.6;
+
+async function tryPlayMusic(){
+  try { await bgm.play(); } catch(_) { /* blocked by browser until gesture */ }
+}
+tryPlayMusic();
+
+// start music on first user gesture if blocked
+function ensureMusicOnGesture(){
+  tryPlayMusic();
+  window.removeEventListener("pointerdown", ensureMusicOnGesture);
+  window.removeEventListener("keydown", ensureMusicOnGesture);
+}
+window.addEventListener("pointerdown", ensureMusicOnGesture, {once:true});
+window.addEventListener("keydown", ensureMusicOnGesture, {once:true});
+
+/* ===== Canvas ===== */
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+function resize(){ canvas.width = innerWidth; canvas.height = innerHeight; }
+resize();
+addEventListener("resize", resize);
+
+/* ===== UI ===== */
+const menu = document.getElementById("menu");
+const progressFill = document.getElementById("progressFill");
+const bestText = document.getElementById("bestText");
+
+/* ===== Game State ===== */
+let gameState = "menu"; // "menu" | "playing" | "dying"
+
+/* ===== Player ===== */
+const player = {
+x: 200, y: 0, size: 45,
+vy: 0, onGround: false,
+rocket: false
+};
+
+/* ===== World ===== */
+const GRAVITY = 2600;
+const JUMP = 1050;
+const SPEED = 350;
+
+let floorY = 0;
+let worldX = 0;
+let levelLength = 6000;
+let levelIndex = 0;
+let currentLevel = null;
+
+/* best progress per level (0..1) */
+let bestScores = [0,0,0,0];
+
+/* ===== Particles ===== */
+let particles = [];
+function spawnDeathParticles(px, py){
+  for(let i=0;i<35;i++){
+    particles.push({
+      x:px, y:py,
+      vx:(Math.random()-0.5)*900,
+      vy:(Math.random()-0.7)*900,
+      life:0.6
+    });
+  }
+}
+
+/* death timer */
+let deathTimer = 0;
+
+/* ===== Levels ===== */
+const levels = [
+  {
+    length: 6000,
+    colorTop: "#0a0f2b",
+    colorBottom: "#04060f",
+    spikes: [1200,1500,1800,2500,2700,3000,3500,4200,4500,4800]
+  },
+  {
+    length: 9000,
+    colorTop: "#2b0a2b",
+    colorBottom: "#0f040f",
+    spikes: [900,1100,1400,1800,2100,2600,2900,3200,3800,4300,4600,5000,5400,5900,6400,6900,7400]
+  },
+  {
+    length: 9000,
+    colorTop: "#0a2b1f",
+    colorBottom: "#04100a",
+    spikes: [1400,1700,2100,2600,3000,3500],
+    portal: 2500,
+    rocketTunnelStart: 3200,
+    rocketTunnelEnd: 8600
+  },
+  {
+  length: 11000,
+  colorTop: "#401400",
+colorBottom: "#120400",
+
+
+  spikes: [
+    1000,1300,1700,2100,2400,
+    3000,3300,3700,
+    6500,6900,7200,7600,
+    8800,9100,9400
+  ],
+
+  portal: 2800,            // cube -> rocket
+  secondPortal: 6000,      // rocket -> cube
+
+  rocketTunnelStart: 3200,
+  rocketTunnelEnd: 5800
+}
+
+];
+
+/* ===== Input ===== */
+let jumpHeld = false;
+addEventListener("keydown", e=>{
+  if(e.code==="Space"||e.code==="ArrowUp") jumpHeld = true;
+});
+addEventListener("keyup", e=>{
+  if(e.code==="Space"||e.code==="ArrowUp") jumpHeld = false;
+});
+addEventListener("pointerdown", ()=> jumpHeld = true);
+addEventListener("pointerup", ()=> jumpHeld = false);
+
+/* ===== Reset / Menu ===== */
+function hardResetForLevel(){
+  worldX = 0;
+  player.vy = 0;
+  player.onGround = false;
+  player.rocket = false;
+
+  floorY = canvas.height * 0.8;
+  player.y = floorY - player.size;
+
+  particles = [];
+  deathTimer = 0;
+
+  progressFill.style.width = "0%";
+  bestText.innerText = "Best: " + Math.floor(bestScores[levelIndex]*100) + "%";
+}
+
+function showMenu(){
+  gameState = "menu";
+  currentLevel = null;
+  menu.style.display = "block";
+}
+
+function startLevel(index){
+  levelIndex = index;
+  currentLevel = levels[index];
+  levelLength = currentLevel.length;
+
+  menu.style.display = "none";
+  gameState = "playing";
+
+  hardResetForLevel();
+
+  // prevent huge dt jump if user waited in menu
+  last = performance.now();
+}
+
+/* ===== Collision ===== */
+function spikeRect(wx, y){
+  const sx = wx - worldX;
+  return { x:sx-35, y:y, w:70, h:70 };
+}
+function hitAABB(r){
+  return (
+    player.x < r.x + r.w &&
+    player.x + player.size > r.x &&
+    player.y < r.y + r.h &&
+    player.y + player.size > r.y
+  );
+}
+function hitSpike(wx, y){
+  return hitAABB(spikeRect(wx, y));
+}
+function hitPortal(){
+
+  if(!currentLevel) return false;
+
+  // First portal (cube -> rocket)
+  if(currentLevel.portal){
+    const sx = currentLevel.portal - worldX;
+    const r = { x:sx-40, y:floorY-160, w:80, h:80 };
+    if(hitAABB(r) && !player.rocket){
+      player.rocket = true;
+      player.vy = 0;
+      return false;
+    }
+  }
+
+  // Second portal (rocket -> cube)
+  if(currentLevel.secondPortal){
+    const sx2 = currentLevel.secondPortal - worldX;
+    const r2 = { x:sx2-40, y:floorY-160, w:80, h:80 };
+    if(hitAABB(r2) && player.rocket){
+      player.rocket = false;
+      player.vy = 0;
+      return false;
+    }
+  }
+
+  return false;
+}
+
+
+/* ===== Death handling ===== */
+function triggerDeath(){
+  if(gameState !== "playing") return;
+
+  gameState = "dying";
+  deathTimer = 0.55;
+
+  spawnDeathParticles(player.x + player.size/2, player.y + player.size/2);
+}
+
+/* ===== Drawing ===== */
+function drawBackground(){
+  const top = currentLevel ? currentLevel.colorTop : "#0a0f2b";
+  const bot = currentLevel ? currentLevel.colorBottom : "#04060f";
+  const g = ctx.createLinearGradient(0,0,0,canvas.height);
+  g.addColorStop(0, top);
+  g.addColorStop(1, bot);
+  ctx.fillStyle = g;
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+}
+
+function drawFloorSpike(wx){
+  const sx = wx - worldX;
+  ctx.beginPath();
+  ctx.moveTo(sx-35, floorY);
+  ctx.lineTo(sx, floorY-70);
+  ctx.lineTo(sx+35, floorY);
+  ctx.closePath();
+  ctx.fillStyle = "#ff5070";
+  ctx.fill();
+}
+
+function drawCeilSpike(wx){
+  const sx = wx - worldX;
+  ctx.beginPath();
+  ctx.moveTo(sx-35, 0);
+  ctx.lineTo(sx, 70);
+  ctx.lineTo(sx+35, 0);
+  ctx.closePath();
+  ctx.fillStyle = "#ff5070";
+  ctx.fill();
+}
+
+function drawPortal(){
+
+  if(!currentLevel) return;
+
+  // First portal
+  if(currentLevel.portal){
+    const sx = currentLevel.portal - worldX;
+    ctx.beginPath();
+    ctx.arc(sx, floorY-120, 40, 0, Math.PI*2);
+    ctx.fillStyle = "rgba(0,255,200,0.8)";
+    ctx.fill();
+    ctx.strokeStyle = "white";
+    ctx.lineWidth = 4;
+    ctx.stroke();
+  }
+
+  // Second portal
+  if(currentLevel.secondPortal){
+    const sx2 = currentLevel.secondPortal - worldX;
+    ctx.beginPath();
+    ctx.arc(sx2, floorY-120, 40, 0, Math.PI*2);
+    ctx.fillStyle = "rgba(255,120,0,0.8)";
+    ctx.fill();
+    ctx.strokeStyle = "white";
+    ctx.lineWidth = 4;
+    ctx.stroke();
+  }
+
+}
+
+
+function drawPlayer(){
+  if(player.rocket){
+    ctx.fillStyle="white";
+    ctx.beginPath();
+    ctx.moveTo(player.x, player.y + player.size);
+    ctx.lineTo(player.x + player.size, player.y + player.size/2);
+    ctx.lineTo(player.x, player.y);
+    ctx.closePath();
+    ctx.fill();
+  } else {
+    ctx.fillStyle="white";
+    ctx.fillRect(player.x, player.y, player.size, player.size);
+
+    const cx = player.x + player.size/2;
+    const cy = player.y + player.size/2;
+
+    // eyes
+    ctx.fillStyle="black";
+    ctx.beginPath();
+    ctx.arc(cx-8, cy-6, 4, 0, Math.PI*2);
+    ctx.arc(cx+8, cy-6, 4, 0, Math.PI*2);
+    ctx.fill();
+
+    ctx.strokeStyle = "black";
+    ctx.lineWidth = 4;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.arc(cx, cy+3, player.size*0.34, 0.05, Math.PI-0.05);
+    ctx.stroke();
+  }
+}
+
+function drawParticles(dt){
+  particles = particles.filter(p=>{
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.vy += 1200 * dt;
+    p.life -= dt;
+
+    if(p.life > 0){
+      ctx.globalAlpha = Math.max(0, p.life);
+      ctx.fillStyle = "white";
+      ctx.fillRect(p.x, p.y, 3, 3);
+      ctx.globalAlpha = 1;
+      return true;
+    }
+    return false;
+  });
+}
+
+/* ===== Loop ===== */
+let last = performance.now();
+function loop(now){
+  const dt = Math.min(0.03, (now-last)/1000);
+  last = now;
+
+  floorY = canvas.height * 0.8;
+
+  drawBackground();
+
+  if(gameState === "menu"){
+    requestAnimationFrame(loop);
+    return;
+  }
+
+  if(!currentLevel){
+    showMenu();
+    requestAnimationFrame(loop);
+    return;
+  }
+
+  if(gameState === "playing"){
+    worldX += SPEED * dt;
+
+    if(worldX >= levelLength){
+      worldX = levelLength;
+
+      progressFill.style.width = "100%";
+      bestScores[levelIndex] = 1;
+      bestText.innerText = "Best: 100%";
+
+      showMenu();
+      requestAnimationFrame(loop);
+      return;
+    }
+
+    hitPortal();
+
+
+    if(player.rocket){
+      const power = 2000;
+      if(jumpHeld) player.vy -= power * dt;
+      else player.vy += power * dt;
+
+      player.vy = Math.max(Math.min(player.vy, 600), -600);
+      player.y += player.vy * dt;
+
+      if(player.y < 0){ player.y = 0; player.vy = 0; }
+      if(player.y + player.size > canvas.height){
+        player.y = canvas.height - player.size; player.vy = 0;
+      }
+    } else {
+      player.vy += GRAVITY * dt;
+      player.y += player.vy * dt;
+
+      if(player.y + player.size >= floorY){
+        player.y = floorY - player.size;
+        player.vy = 0;
+        player.onGround = true;
+      } else {
+        player.onGround = false;
+      }
+
+      if(jumpHeld && player.onGround){
+        player.vy = -JUMP;
+      }
+    }
+
+    for(const sp of currentLevel.spikes){
+      if(hitSpike(sp, floorY-70)){ triggerDeath(); break; }
+    }
+
+    if(player.rocket && currentLevel.rocketTunnelStart){
+  for(let x=currentLevel.rocketTunnelStart; x<currentLevel.rocketTunnelEnd; x+=140){
+    if(hitSpike(x, floorY-70) || hitSpike(x, 0)){
+      triggerDeath(); break;
+    }
+  }
+}
+
+if(
+  player.rocket &&
+  currentLevel.secondPortal &&
+  worldX > currentLevel.secondPortal + 150
+){
+  triggerDeath();
+}
+
+
+    const progress = Math.max(0, Math.min(1, worldX / levelLength));
+    progressFill.style.width = (progress*100) + "%";
+    if(progress > bestScores[levelIndex]) bestScores[levelIndex] = progress;
+    bestText.innerText = "Best: " + Math.floor(bestScores[levelIndex]*100) + "%";
+  }
+
+  if(gameState === "dying"){
+    deathTimer -= dt;
+    if(deathTimer <= 0){
+      gameState = "playing";
+      hardResetForLevel();
+    }
+  }
+
+  if(currentLevel){
+    ctx.fillStyle = "rgba(255,255,255,0.06)";
+    ctx.fillRect(0, floorY, canvas.width, canvas.height-floorY);
+
+    for(const sp of currentLevel.spikes) drawFloorSpike(sp);
+    drawPortal();
+
+    if(player.rocket && currentLevel.rocketTunnelStart){
+  for(let x=currentLevel.rocketTunnelStart; x<currentLevel.rocketTunnelEnd; x+=140){
+    drawFloorSpike(x);
+    drawCeilSpike(x);
+  }
+}
+
+if(
+  currentLevel.secondPortal &&
+  player.rocket
+){
+  const wallX = currentLevel.secondPortal + 150;
+
+  for(let y = 0; y < canvas.height; y += 70){
+
+    const sx = wallX - worldX;
+
+    ctx.beginPath();
+    ctx.moveTo(sx-35, y+70);
+    ctx.lineTo(sx, y);
+    ctx.lineTo(sx+35, y+70);
+    ctx.closePath();
+    ctx.fillStyle = "#ff5070";
+    ctx.fill();
+  }
+}
+
+
+
+    drawPlayer();
+    drawParticles(dt);
+  }
+
+  requestAnimationFrame(loop);
+}
+
+showMenu();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
